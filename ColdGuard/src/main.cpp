@@ -49,12 +49,12 @@
 // WiFi network name (SSID)
 // "Wokwi-GUEST" is the built-in simulator network
 // On real hardware: replace with customer's WiFi name
-const char* WIFI_SSID     = "WILHELM.TEL-ZFVXRECFAJ";
+const char* WIFI_SSID     = "YOUR_WIFI_SSID";
 
 // WiFi password
 // Empty "" because Wokwi-GUEST is an open network
 // On real hardware: replace with customer's WiFi password
-const char* WIFI_PASSWORD = "25534572315758081549";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // ─────────────────────────────────────────────────────
 // API CONFIGURATION
@@ -63,7 +63,7 @@ const char* WIFI_PASSWORD = "25534572315758081549";
 // URL of the Django API endpoint that receives temperature data
 // Replace "your-server.com" with real Hetzner server URL in production
 // Example: "http://coldguard.de/api/temperature/"
-const char* API_URL = "http://192.168.178.23:8000/api/temperature/";
+const char* API_URL      = "http://YOUR_SERVER_IP:8000/api/temperature/";
 
 // Unique key that identifies this specific device
 // Django uses this to know WHICH device is sending data
