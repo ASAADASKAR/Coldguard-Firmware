@@ -41,35 +41,7 @@
 #include <WiFi.h>             // ESP32 WiFi — connect to network
 #include <HTTPClient.h>       // Send HTTP requests (GET, POST...)
 #include <ArduinoJson.h>      // Build and parse JSON payloads
-
-// ─────────────────────────────────────────────────────
-// WIFI CONFIGURATION
-// ─────────────────────────────────────────────────────
-
-// WiFi network name (SSID)
-// "Wokwi-GUEST" is the built-in simulator network
-// On real hardware: replace with customer's WiFi name
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-
-// WiFi password
-// Empty "" because Wokwi-GUEST is an open network
-// On real hardware: replace with customer's WiFi password
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
-
-// ─────────────────────────────────────────────────────
-// API CONFIGURATION
-// ─────────────────────────────────────────────────────
-
-// URL of the Django API endpoint that receives temperature data
-// Replace "your-server.com" with real Hetzner server URL in production
-// Example: "http://coldguard.de/api/temperature/"
-const char* API_URL      = "http://YOUR_SERVER_IP:8000/api/temperature/";
-
-// Unique key that identifies this specific device
-// Django uses this to know WHICH device is sending data
-// Each customer gets a different key
-// Example: "coldguard-restaurant-hamburg-01"
-const char* DEVICE_KEY = "coldguard-device-003";
+#include "config.h"
 
 // ─────────────────────────────────────────────────────
 // HARDWARE CONFIGURATION
