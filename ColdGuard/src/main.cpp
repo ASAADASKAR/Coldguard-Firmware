@@ -7,309 +7,200 @@
  * Author:      Asaad Askar
  * Date:        May 2026
  * Repo:        github.com/asaadaskar/Coldguard-Firmware
- *
- * What's new in v2.0 (compared to v1.0):
- *   - WiFi connection on startup
- *   - HTTP POST sends data to Django API
- *   - Retry logic: tries 3x if request fails
- *   - Heartbeat counter: warns if server unreachable
- *   - Device API Key: identifies which device sends data
- *
- * How it works (step by step):
- *   1. ESP32 starts → connects to WiFi
- *   2. Every 5 seconds: reads temperature from DS18B20
- *   3. Checks if temperature is in safe range
- *   4. Sends data to Django API via HTTP POST
- *   5. If sending fails → retries up to 3 times
- *   6. If 3+ failures → heartbeat warning
- *
- * Wiring:
- *   DS18B20 VCC  --> ESP32 3.3V
- *   DS18B20 GND  --> ESP32 GND
- *   DS18B20 DQ   --> ESP32 GPIO4
- *   4.7kOhm resistor between DQ and 3.3V (Pull-up)
  * =====================================================
  */
 
-// ─────────────────────────────────────────────────────
-// LIBRARIES
-// ─────────────────────────────────────────────────────
-
-#include <Arduino.h>          // Base ESP32 functions (setup, loop, Serial...)
-#include <OneWire.h>          // 1-Wire protocol — needed for DS18B20
-#include <DallasTemperature.h>// DS18B20 specific functions (read temp etc.)
-#include <WiFi.h>             // ESP32 WiFi — connect to network
-#include <HTTPClient.h>       // Send HTTP requests (GET, POST...)
-#include <ArduinoJson.h>      // Build and parse JSON payloads
+#include <Arduino.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include "config.h"
 
 // ─────────────────────────────────────────────────────
 // HARDWARE CONFIGURATION
 // ─────────────────────────────────────────────────────
-
-// GPIO pin where DS18B20 DATA wire is connected
-// We chose GPIO4 — free pin, no conflicts
 #define ONE_WIRE_BUS 4
-
-// ─────────────────────────────────────────────────────
-// TEMPERATURE THRESHOLDS
-// ─────────────────────────────────────────────────────
-
-// Upper limit: fridge should never go above 8°C
-// If temp > 8.0 → send ALARM_HIGH → email to owner
 #define TEMP_MAX 8.0
-
-// Lower limit: fridge should never go below 1°C
-// If temp < 1.0 → send ALARM_LOW → risk of freezing
 #define TEMP_MIN 1.0
-
-// ─────────────────────────────────────────────────────
-// TIMING CONFIGURATION
-// ─────────────────────────────────────────────────────
-
-// How often to measure temperature (in milliseconds)
-// 5000  = every 5 seconds  → for simulator (fast testing)
-// 60000 = every 60 seconds → for production (real device)
 #define MEASURE_INTERVAL 5000
-
-// How many times to retry a failed HTTP request
-// If all 3 retries fail → heartbeat warning is shown
 #define MAX_RETRIES 3
+
+// ─────────────────────────────────────────────────────
+// LOGGING
+// ─────────────────────────────────────────────────────
+#define LOG_INFO  "INFO"
+#define LOG_WARN  "WARN"
+#define LOG_ERROR "ERROR"
+#define LOG_HTTP  "HTTP"
+#define LOG_WIFI  "WIFI"
+#define LOG_TEMP  "TEMP"
+
+/**
+ * Prints a formatted log message with timestamp.
+ * Format: [MM:SS] [LEVEL] message
+ */
+void log(const char* level, const char* message) {
+    unsigned long ms  = millis();
+    unsigned long sec = ms / 1000;
+    unsigned long min = sec / 60;
+    Serial.printf("[%02lu:%02lu] [%s] %s\n",
+        min, sec % 60, level, message);
+}
+
+/**
+ * Prints a formatted log message with variables.
+ * Works like printf — supports %s, %d, %f etc.
+ */
+void logf(const char* level, const char* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    log(level, buffer);
+}
 
 // ─────────────────────────────────────────────────────
 // OBJECTS
 // ─────────────────────────────────────────────────────
-
-// OneWire object: manages communication on the data wire
-// Needs to know which GPIO pin the sensor is on
 OneWire oneWire(ONE_WIRE_BUS);
-
-// DallasTemperature object: handles DS18B20 specific commands
-// Uses the OneWire object to talk to the sensor
 DallasTemperature sensors(&oneWire);
-
-// ─────────────────────────────────────────────────────
-// GLOBAL STATE
-// ─────────────────────────────────────────────────────
-
-// Counts how many HTTP requests failed in a row
-// Reset to 0 when a request succeeds
-// Used to detect if server is unreachable (heartbeat)
 int failedRequests = 0;
 
 // ─────────────────────────────────────────────────────
 // FUNCTION: connectWiFi()
 // ─────────────────────────────────────────────────────
-// Connects ESP32 to WiFi network
-// Returns: true if connected, false if failed
-// ─────────────────────────────────────────────────────
 bool connectWiFi() {
-  Serial.print("[WiFi] Connecting to ");
-  Serial.println(WIFI_SSID);
+    logf(LOG_WIFI, "Connecting to %s", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  // Start WiFi connection with SSID and password
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+    Serial.println();
 
-  // Wait until connected — check every 500ms
-  // Stop after 20 attempts (= 10 seconds max)
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print("."); // Show progress dots
-    attempts++;
-  }
+    if (WiFi.status() == WL_CONNECTED) {
+        logf(LOG_WIFI, "Connected! IP: %s",
+            WiFi.localIP().toString().c_str());
+        return true;
+    }
 
-  Serial.println(); // New line after dots
-
-  // Check if we connected successfully
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("[WiFi] Connected! IP: ");
-    Serial.println(WiFi.localIP()); // Show assigned IP address
-    return true;
-  }
-
-  // If we reach here — connection failed
-  Serial.println("[WiFi] FAILED — no connection!");
-  return false;
+    log(LOG_WIFI, "FAILED — no connection!");
+    return false;
 }
 
 // ─────────────────────────────────────────────────────
 // FUNCTION: sendToAPI(temp, status)
 // ─────────────────────────────────────────────────────
-// Sends temperature data to Django API via HTTP POST
-// Parameters:
-//   temp   — temperature in Celsius (e.g. 4.5)
-//   status — "OK", "ALARM_HIGH" or "ALARM_LOW"
-// Returns: true if server responded with 200/201
-// ─────────────────────────────────────────────────────
 bool sendToAPI(float temp, String status) {
 
-  // Check WiFi is still connected before sending
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[HTTP] WiFi lost — reconnecting...");
-    if (!connectWiFi()) return false; // Give up if can't reconnect
-  }
+    if (WiFi.status() != WL_CONNECTED) {
+        log(LOG_WIFI, "WiFi lost — reconnecting...");
+        if (!connectWiFi()) return false;
+    }
 
-  // Create HTTP client object
-  HTTPClient http;
+    HTTPClient http;
+    http.begin(API_URL);
+    http.setTimeout(5000);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Device-Key", DEVICE_KEY);
 
-  // Set the target URL (Django API endpoint)
-  http.begin(API_URL);
+    JsonDocument doc;
+    doc["temperature"] = temp;
+    doc["status"]      = status;
+    doc["device"]      = DEVICE_KEY;
 
-  // Set timeout: give up if server doesn't respond in 5 seconds
-  http.setTimeout(5000);
+    String payload;
+    serializeJson(doc, payload);
 
-  // Set headers so Django knows what we're sending
-  http.addHeader("Content-Type", "application/json"); // We're sending JSON
-  http.addHeader("X-Device-Key", DEVICE_KEY);         // Our device identity
+    logf(LOG_HTTP, "POST → %s", payload.c_str());
 
-  // ── Build JSON payload ──
-  // This is the data we send to Django
-  // Django will receive: {"temperature": 22, "status": "ALARM_HIGH", "device": "coldguard-device-001"}
-  JsonDocument doc;            // Create empty JSON document
-  doc["temperature"] = temp;   // Add temperature value
-  doc["status"]      = status; // Add status string
-  doc["device"]      = DEVICE_KEY; // Add device identifier
+    int code = http.POST(payload);
+    http.end();
 
-  // Convert JSON document to String
-  String payload;
-  serializeJson(doc, payload);
+    if (code == 200 || code == 201) {
+        logf(LOG_HTTP, "Success! Code: %d", code);
+        failedRequests = 0;
+        return true;
+    }
 
-  // Show what we're sending in Serial Monitor
-  Serial.print("[HTTP] POST → ");
-  Serial.println(payload);
-
-  // ── Send HTTP POST request ──
-  int code = http.POST(payload); // Returns HTTP response code
-  http.end();                    // Close connection to free memory
-
-  // Check if server accepted our data
-  if (code == 200 || code == 201) {
-    // 200 = OK, 201 = Created — both mean success
-    Serial.print("[HTTP] Success! Code: ");
-    Serial.println(code);
-    failedRequests = 0; // Reset failure counter on success
-    return true;
-  }
-
-  // If we reach here — request failed
-  // code = -1 means no server found (DNS failed)
-  Serial.print("[HTTP] Failed! Code: ");
-  Serial.println(code);
-  failedRequests++; // Increment failure counter
-  return false;
+    logf(LOG_HTTP, "Failed! Code: %d", code);
+    failedRequests++;
+    return false;
 }
 
 // ─────────────────────────────────────────────────────
 // FUNCTION: getStatus(temp)
 // ─────────────────────────────────────────────────────
-// Determines the status string based on temperature
-// Returns: "OK", "ALARM_HIGH" or "ALARM_LOW"
-// ─────────────────────────────────────────────────────
 String getStatus(float temp) {
-  if (temp > TEMP_MAX) return "ALARM_HIGH"; // Too warm
-  if (temp < TEMP_MIN) return "ALARM_LOW";  // Too cold
-  return "OK";                              // Normal range
+    if (temp > TEMP_MAX) return "ALARM_HIGH";
+    if (temp < TEMP_MIN) return "ALARM_LOW";
+    return "OK";
 }
 
 // ─────────────────────────────────────────────────────
-// FUNCTION: printAlarm(message)
-// ─────────────────────────────────────────────────────
-// Prints a formatted alarm message to Serial Monitor
-// ─────────────────────────────────────────────────────
-void printAlarm(String message) {
-  Serial.println("=====================================");
-  Serial.println("[ALARM] " + message);
-  Serial.println("=====================================");
-}
-
-// ─────────────────────────────────────────────────────
-// SETUP — runs once when ESP32 starts
+// SETUP
 // ─────────────────────────────────────────────────────
 void setup() {
+    Serial.begin(115200);
 
-  // Start Serial Monitor at 115200 baud
-  // This allows us to see debug output in the terminal
-  Serial.begin(115200);
+    log(LOG_INFO, "=====================================");
+    log(LOG_INFO, "  ColdGuard v2.0 started!");
+    log(LOG_INFO, "=====================================");
 
-  // Print startup banner
-  Serial.println("=====================================");
-  Serial.println("  ColdGuard v2.0 started!");
-  Serial.println("=====================================");
+    sensors.begin();
+    log(LOG_INFO, "DS18B20 sensor initialized");
 
-  // Initialize DS18B20 sensor
-  // This searches for sensors on the OneWire bus
-  sensors.begin();
-  Serial.println("[Sensor] DS18B20 ready");
-
-  // Connect to WiFi
-  // If connection fails — device still measures but can't send data
-  connectWiFi();
+    connectWiFi();
 }
 
 // ─────────────────────────────────────────────────────
-// LOOP — runs forever, every MEASURE_INTERVAL ms
+// LOOP
 // ─────────────────────────────────────────────────────
 void loop() {
 
-  // ── STEP 1: Request temperature from sensor ──
-  // Tell all sensors on the bus to measure temperature
-  sensors.requestTemperatures();
+    // STEP 1: Read temperature
+    sensors.requestTemperatures();
+    float tempC = sensors.getTempCByIndex(0);
 
-  // Read the result from the first sensor (index 0)
-  float tempC = sensors.getTempCByIndex(0);
-
-  // ── STEP 2: Check for sensor error ──
-  // DEVICE_DISCONNECTED_C = -127.0
-  // This means sensor is not connected or wiring is wrong
-  if (tempC == DEVICE_DISCONNECTED_C) {
-    Serial.println("[ERROR] Sensor not found! Check wiring.");
-    delay(MEASURE_INTERVAL);
-    return; // Skip rest of loop and start again
-  }
-
-  // ── STEP 3: Print temperature to Serial Monitor ──
-  Serial.println("-------------------------------------");
-  Serial.print("[Temp] ");
-  Serial.print(tempC, 1); // 1 decimal place, e.g. "22.0"
-  Serial.println(" C");
-
-  // ── STEP 4: Determine status and show alarm ──
-  String status = getStatus(tempC);
-
-  if (status == "ALARM_HIGH") {
-    printAlarm("TOO WARM! Cold chain at risk!");
-  } else if (status == "ALARM_LOW") {
-    printAlarm("TOO COLD! Freezing risk!");
-  } else {
-    Serial.println("[OK]   Temperature in normal range.");
-  }
-
-  // ── STEP 5: Send data to Django API with retry ──
-  // Try up to MAX_RETRIES times before giving up
-  for (int i = 0; i < MAX_RETRIES; i++) {
-    if (sendToAPI(tempC, status)) {
-      break; // Success! Stop retrying
+    // STEP 2: Check sensor error
+    if (tempC == DEVICE_DISCONNECTED_C) {
+        log(LOG_ERROR, "Sensor not found! Check wiring.");
+        delay(MEASURE_INTERVAL);
+        return;
     }
-    // Failed — show retry message and wait before next attempt
-    Serial.print("[HTTP] Retry ");
-    Serial.print(i + 1);
-    Serial.print("/");
-    Serial.println(MAX_RETRIES);
-    delay(2000); // Wait 2 seconds before retry
-  }
 
-  // ── STEP 6: Heartbeat check ──
-  // If 3 or more requests failed in a row
-  // → server is unreachable (could be power outage)
-  // → Django server will send email alarm to owner
-  if (failedRequests >= 3) {
-    Serial.println("[WARN] Server unreachable!");
-    Serial.println("       Owner will be alarmed soon.");
-  }
+    // STEP 3: Log temperature
+    logf(LOG_TEMP, "%.1f°C", tempC);
 
-  // ── STEP 7: Wait before next measurement ──
-  // 5000ms = 5 seconds in simulator
-  // Change to 60000 for production
-  delay(MEASURE_INTERVAL);
+    // STEP 4: Determine status
+    String status = getStatus(tempC);
+
+    if (status == "ALARM_HIGH") {
+        log(LOG_WARN, "TOO WARM! Cold chain at risk!");
+    } else if (status == "ALARM_LOW") {
+        log(LOG_WARN, "TOO COLD! Freezing risk!");
+    } else {
+        log(LOG_INFO, "Temperature in normal range.");
+    }
+
+    // STEP 5: Send to API with retry
+    for (int i = 0; i < MAX_RETRIES; i++) {
+        if (sendToAPI(tempC, status)) break;
+        logf(LOG_HTTP, "Retry %d/%d", i + 1, MAX_RETRIES);
+        delay(2000);
+    }
+
+    // STEP 6: Heartbeat check
+    if (failedRequests >= 3) {
+        log(LOG_WARN, "Server unreachable! Owner will be alarmed soon.");
+    }
+
+    // STEP 7: Wait
+    delay(MEASURE_INTERVAL);
 }
