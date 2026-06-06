@@ -12,6 +12,9 @@
 // API Server — local development
 #define API_URL         "http://YOUR_SERVER_IP:8000/api/temperature/"
 
+// Log API Endpoint
+#define LOG_URL         "http://YOUR_SERVER_IP:8000/api/logs/"
+
 // Device identification
 #define DEVICE_KEY      "YOUR_DEVICE_KEY"
 
